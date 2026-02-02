@@ -1,0 +1,12 @@
+{
+  "name": "raw-dng-converter",
+  "version": "0.1.0",
+  "description": "Client-side RAW to DNG converter",
+  "scripts": {
+    "build": "wasm-pack build --target web && rm -rf www/pkg && mv pkg www",
+    "serve": "npx http-server www"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  }
+}

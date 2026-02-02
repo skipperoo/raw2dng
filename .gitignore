@@ -1,0 +1,8 @@
+build
+target
+samples/
+pkg/
+node_modules/
+*.log
+old
+specs.md

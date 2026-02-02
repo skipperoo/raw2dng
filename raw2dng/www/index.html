@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RAW to DNG Converter</title>
+    <meta
+      name="description"
+      content="Privacy-first, client-side RAW to DNG converter for iPad and Desktop."
+    />
+
+    <!-- PWA / iOS Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="RAW2DNG" />
+    <meta name="theme-color" content="#09090b" />
+    <link rel="icon" href="favicon.ico" type="image/x-icon" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.json" />
+
+    <style>
+      :root {
+        --background: #09090b; /* Zinc 950 */
+        --foreground: #fafafa; /* Zinc 50 */
+        --card: #18181b; /* Zinc 900 */
+        --card-foreground: #fafafa;
+        --popover: #09090b;
+        --popover-foreground: #fafafa;
+        --primary: #fafafa;
+        --primary-foreground: #18181b;
+        --secondary: #27272a; /* Zinc 800 */
+        --secondary-foreground: #fafafa;
+        --muted: #27272a;
+        --muted-foreground: #a1a1aa; /* Zinc 400 */
+        --accent: #27272a;
+        --accent-foreground: #fafafa;
+        --destructive: #7f1d1d;
+        --destructive-foreground: #fafafa;
+        --border: #27272a;
+        --input: #27272a;
+        --ring: #d4d4d8;
+        --radius: 0.5rem;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background-color: var(--background);
+        color: var(--foreground);
+        margin: 0;
+        padding: 2rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+      }
+
+      .container {
+        max-width: 600px;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        min-height: calc(100vh - 4rem); /* Full height minus body padding */
+      }
+
+      h1 {
+        font-size: 1.5rem;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+        margin: 0;
+      }
+
+      .card {
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background-color: var(--card);
+        color: var(--card-foreground);
+        padding: 1.5rem;
+        box-shadow:
+          0 1px 3px 0 rgb(0 0 0 / 0.1),
+          0 1px 2px -1px rgb(0 0 0 / 0.1);
+      }
+
+      .input-group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      label {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: var(--foreground);
+      }
+
+      input[type="file"] {
+        font-size: 0.875rem;
+        color: var(--muted-foreground);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0.5rem;
+        background-color: var(--background);
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      input[type="file"]::file-selector-button {
+        border: 0;
+        background: var(--primary);
+        color: var(--primary-foreground);
+        padding: 0.5rem 1rem;
+        border-radius: calc(var(--radius) - 2px);
+        font-size: 0.875rem;
+        font-weight: 500;
+        margin-right: 1rem;
+        cursor: pointer;
+        transition: opacity 0.2s;
+      }
+
+      input[type="file"]::file-selector-button:hover {
+        opacity: 0.9;
+      }
+
+      .status-log {
+        font-family: monospace;
+        font-size: 0.75rem;
+        color: var(--muted-foreground);
+        background-color: var(--secondary);
+        padding: 1rem;
+        border-radius: var(--radius);
+        height: 150px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        white-space: pre-wrap;
+      }
+
+      .download-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.5rem;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius);
+        font-size: 0.875rem;
+        font-weight: 500;
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        transition: opacity 0.2s;
+        border: 1px solid var(--border);
+      }
+
+      .btn-primary {
+        background-color: var(--primary);
+        color: var(--primary-foreground);
+        border: none;
+      }
+
+      .btn-secondary {
+        background-color: var(--secondary);
+        color: var(--secondary-foreground);
+      }
+
+      .btn:hover {
+        opacity: 0.9;
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      /* Spinner Styles */
+      .spinner {
+        width: 1.25rem;
+        height: 1.25rem;
+        border: 2px solid var(--muted-foreground);
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* Switch Styles */
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: var(--secondary);
+        transition: 0.4s;
+        border-radius: 20px;
+        border: 1px solid var(--border);
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 12px;
+        width: 12px;
+        left: 3px;
+        bottom: 3px;
+        background-color: var(--foreground);
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .slider {
+        background-color: var(--primary);
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(16px);
+        background-color: var(--primary-foreground);
+      }
+
+      .download-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem;
+        border-radius: var(--radius);
+        background-color: var(--secondary);
+        border: 1px solid var(--border);
+        margin-top: 0.5em;
+      }
+
+      .download-item a {
+        color: var(--foreground);
+        text-decoration: none;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+
+      .download-item a:hover {
+        text-decoration: underline;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 9999px;
+        border: 1px solid transparent;
+        padding: 0.125rem 0.625rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background-color: var(--primary);
+        color: var(--primary-foreground);
+      }
+
+      footer {
+        margin-top: auto;
+        padding: 2rem 0;
+        width: 100%;
+        max-width: 600px;
+        border-top: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        font-size: 0.875rem;
+        color: var(--muted-foreground);
+      }
+
+      .footer-links {
+        display: flex;
+        gap: 1rem;
+      }
+
+      .footer-links a {
+        color: var(--foreground);
+        text-decoration: none;
+      }
+
+      .footer-links a:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>RAW to DNG Converter</h1>
+
+      <div class="card">
+        <div class="input-group">
+          <label for="fileInput">Select RAW Images</label>
+          <input
+            type="file"
+            id="fileInput"
+            multiple
+            accept=".arw,.cr2,.nef,.dng,.orf,.raf,.rw2"
+          />
+        </div>
+      </div>
+
+      <div class="card">
+        <div
+          style="
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+          "
+        >
+          <label style="margin-bottom: 0">Status</label>
+          <div style="display: flex; align-items: center; gap: 0.75rem">
+            <button
+              id="stopBtn"
+              class="btn btn-secondary hidden"
+              style="
+                padding: 0.25rem 0.75rem;
+                font-size: 0.75rem;
+                border-color: var(--destructive);
+                color: #fca5a5;
+              "
+            >
+              Stop
+            </button>
+            <div id="statusSpinner" class="spinner hidden"></div>
+          </div>
+        </div>
+        <div id="statusLog" class="status-log">Ready...</div>
+      </div>
+
+      <div id="downloadContainer" class="hidden">
+        <div class="download-header">
+          <label>Ready for Download</label>
+          <div style="display: flex; align-items: center; gap: 0.75rem">
+            <div style="display: flex; align-items: center; gap: 0.35rem">
+              <label
+                for="zipToggle"
+                style="font-size: 0.75rem; color: var(--muted-foreground)"
+                >ZIP Archive</label
+              >
+              <label class="switch">
+                <input type="checkbox" id="zipToggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <button id="downloadAllBtn" class="btn btn-primary">
+              Download All
+            </button>
+          </div>
+        </div>
+        <div id="downloadArea" class="download-list"></div>
+      </div>
+
+      <footer>
+        <div class="footer-links">
+          <a
+            href="https://github.com/skipperoo/raw-to-dng-converter"
+            target="_blank"
+            >GitHub</a
+          >
+          <a href="#">Privacy Policy</a>
+        </div>
+        <div>
+          Built with Rust & WebAssembly. All processing happens locally on your
+          device.
+        </div>
+        <div style="font-size: 0.75rem">© 2026 Leonardo Scoppitto</div>
+      </footer>
+    </div>
+
+    <script type="module">
+      import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
+
+      const fileInput = document.getElementById("fileInput");
+      const statusLog = document.getElementById("statusLog");
+      const statusSpinner = document.getElementById("statusSpinner");
+      const stopBtn = document.getElementById("stopBtn");
+      const downloadArea = document.getElementById("downloadArea");
+      const downloadContainer = document.getElementById("downloadContainer");
+      const downloadAllBtn = document.getElementById("downloadAllBtn");
+      const zipToggle = document.getElementById("zipToggle");
+
+      let convertedFiles = []; // Array of { name, blob }
+      let processingQueue = [];
+      let isProcessing = false;
+      let worker = null;
+
+      function log(message) {
+        const div = document.createElement("div");
+        div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        statusLog.appendChild(div);
+        statusLog.scrollTop = statusLog.scrollHeight;
+      }
+
+      function updateUIState() {
+        if (isProcessing || processingQueue.length > 0) {
+          statusSpinner.classList.remove("hidden");
+          stopBtn.classList.remove("hidden");
+          downloadAllBtn.disabled = true;
+        } else {
+          statusSpinner.classList.add("hidden");
+          stopBtn.classList.add("hidden");
+          downloadAllBtn.disabled = false;
+        }
+      }
+
+      function stopProcessing() {
+        if (!isProcessing && processingQueue.length === 0) return;
+
+        log("Stopping all processing...");
+        processingQueue = [];
+        isProcessing = false;
+
+        if (worker) {
+          worker.terminate();
+          log("Worker terminated.");
+        }
+
+        updateUIState();
+        initWorker().catch((err) => log(`Failed to restart worker: ${err}`));
+      }
+
+      async function initWorker() {
+        return new Promise((resolve, reject) => {
+          log("Initializing Web Worker...");
+          worker = new Worker("worker.js", { type: "module" });
+
+          worker.onmessage = (e) => {
+            const { type, payload } = e.data;
+            if (type === "init-success") {
+              log("Wasm module loaded in worker. Ready to convert.");
+              resolve();
+            } else if (type === "init-error") {
+              log(`Worker Init Error: ${payload}`);
+              reject(payload);
+            } else if (type === "convert-success") {
+              handleConvertSuccess(payload);
+            } else if (type === "convert-error") {
+              handleConvertError(payload);
+            } else if (type === "error") {
+              log(`Worker Error: ${payload}`);
+            }
+          };
+
+          worker.postMessage({ type: "init" });
+        });
+      }
+
+      function handleConvertSuccess({ dngBuffer, fileName, id }) {
+        const blob = new Blob([dngBuffer], { type: "image/x-adobe-dng" });
+        const url = URL.createObjectURL(blob);
+        convertedFiles.push({
+          name: fileName.replace(/\.[^/.]+$/, "") + ".dng",
+          blob,
+        });
+
+        const item = document.createElement("div");
+        item.className = "download-item";
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName.replace(/\.[^/.]+$/, "") + ".dng";
+        link.textContent = `Download ${link.download}`;
+        const sizeBadge = document.createElement("span");
+        sizeBadge.className = "badge";
+        sizeBadge.textContent = `${(blob.size / 1024 / 1024).toFixed(2)} MB`;
+
+        item.appendChild(link);
+        item.appendChild(sizeBadge);
+        downloadArea.appendChild(item);
+
+        log(`  Success: ${fileName}`);
+        isProcessing = false;
+        processNextInQueue();
+      }
+
+      function handleConvertError({ error, id }) {
+        log(`  Error converting: ${error}`);
+        isProcessing = false;
+        processNextInQueue();
+      }
+
+      async function processNextInQueue() {
+        if (isProcessing || processingQueue.length === 0) {
+          if (processingQueue.length === 0 && !isProcessing) {
+            log("Batch processing complete.");
+            updateUIState();
+          }
+          return;
+        }
+
+        isProcessing = true;
+        updateUIState();
+        const { file } = processingQueue.shift();
+        log(
+          `Processing: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`,
+        );
+
+        try {
+          const buffer = await file.arrayBuffer();
+          worker.postMessage(
+            {
+              type: "convert",
+              payload: { buffer, fileName: file.name, id: Date.now() },
+            },
+            [buffer],
+          );
+        } catch (err) {
+          log(`  Failed to read file: ${err}`);
+          isProcessing = false;
+          processNextInQueue();
+        }
+      }
+
+      fileInput.addEventListener("change", async (event) => {
+        const files = Array.from(event.target.files);
+        if (!files || files.length === 0) return;
+
+        log(`Selected ${files.length} files. Adding to queue...`);
+        downloadContainer.classList.remove("hidden");
+
+        // We don't reset convertedFiles here to allow adding more to the batch
+        // or we can reset if that's the desired behavior. The previous code reset it.
+        // User said "photo in the batch that are still processing", implying a batch.
+        // Let's reset on every file selection to match previous behavior.
+        convertedFiles = [];
+        downloadArea.innerHTML = "";
+
+        files.forEach((file) => {
+          processingQueue.push({ file });
+        });
+
+        fileInput.value = ""; // Reset input
+        processNextInQueue();
+      });
+
+      downloadAllBtn.addEventListener("click", async () => {
+        if (zipToggle.checked) {
+          log("Generating ZIP archive...");
+          const zip = new JSZip();
+          convertedFiles.forEach((file) => {
+            zip.file(file.name, file.blob);
+          });
+          const content = await zip.generateAsync({ type: "blob" });
+          const url = URL.createObjectURL(content);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `converted_images_${Date.now()}.zip`;
+          link.click();
+          URL.revokeObjectURL(url);
+          log("ZIP archive downloaded.");
+        } else {
+          const links = downloadArea.querySelectorAll("a");
+          log(`Triggering download for ${links.length} files...`);
+          links.forEach((link, index) => {
+            setTimeout(() => {
+              link.click();
+            }, index * 200);
+          });
+        }
+      });
+
+      stopBtn.addEventListener("click", stopProcessing);
+
+      initWorker().catch((err) =>
+        console.error("Worker initialization failed", err),
+      );
+
+      // Register Service Worker for PWA
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("./sw.js")
+            .then((reg) => console.log("SW registered"))
+            .catch((err) => console.error("SW failed", err));
+        });
+      }
+    </script>
+  </body>
+</html>

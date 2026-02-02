@@ -1,0 +1,6 @@
+services:
+  raw2dng:
+    image: ghcr.io/skipperoo/raw2dng:latest
+    ports:
+      - "8080:80"
+    restart: unless-stopped

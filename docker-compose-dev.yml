@@ -1,0 +1,9 @@
+services:
+  raw2dng:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: raw2dng-converter:latest
+    ports:
+      - "8080:80"
+    restart: unless-stopped
