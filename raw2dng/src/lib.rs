@@ -4,11 +4,145 @@ use dng::{DngWriter, FileType};
 use flate2::write::ZlibEncoder;
 use flate2::Compression as FlateCompression;
 use rawler::decoders::{RawDecodeParams, RawLoader as RawlerLoader};
+use rawler::formats::tiff::reader::{GenericTiffReader, TiffReader};
+use rawler::formats::tiff::Value as RawlerValue;
 use rawler::rawsource::RawSource;
 use rawloader::{Orientation as RawOrientation, RawImageData, RawLoader};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
+
+fn rawler_to_dng_value(v: &RawlerValue) -> Option<IfdValue> {
+    match v {
+        RawlerValue::Byte(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Byte(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Byte(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Short(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Short(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Short(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Long(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Long(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Long(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Rational(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Rational(vec[0].n, vec[0].d))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|x| IfdValue::Rational(x.n, x.d)).collect(),
+                ))
+            }
+        }
+        RawlerValue::SByte(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::SByte(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::SByte(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::SShort(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::SShort(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::SShort(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::SLong(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::SLong(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::SLong(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::SRational(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::SRational(vec[0].n, vec[0].d))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|x| IfdValue::SRational(x.n, x.d)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Float(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Float(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Float(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Double(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Double(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Double(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Ascii(tiff_ascii) => {
+            if let Some(s) = tiff_ascii.strings().first() {
+                Some(IfdValue::Ascii(s.clone()))
+            } else {
+                None
+            }
+        }
+        RawlerValue::Undefined(vec) => {
+            if vec.len() == 1 {
+                Some(IfdValue::Undefined(vec[0]))
+            } else {
+                Some(IfdValue::List(
+                    vec.iter().map(|&x| IfdValue::Undefined(x)).collect(),
+                ))
+            }
+        }
+        RawlerValue::Unknown(_, _) => None,
+    }
+}
+
+fn transfer_tags(src: &rawler::formats::tiff::IFD, dst: &mut Ifd, blacklist: &[u16]) {
+    for (&tag, entry) in src.entries() {
+        if blacklist.contains(&tag) {
+            continue;
+        }
+        // Skip dangerous tags (offsets, pointers, image-specific tags that should be managed manually)
+        match tag {
+            0x0111 | 0x0117 | 0x0144 | 0x0145 | 0x014a | 0x8769 | 0x8825 | 0x0100 | 0x0101
+            | 0x0102 | 0x0103 | 0x0106 | 0x0115 | 0x0116 | 0x011c | 0x0153 => continue,
+            _ => {}
+        }
+        if let Some(val) = rawler_to_dng_value(&entry.value) {
+            dst.insert(
+                MaybeKnownIfdFieldDescriptor::from_number(tag, dst.get_type()),
+                val,
+            );
+        }
+    }
+}
 
 #[wasm_bindgen]
 pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValue> {
@@ -29,6 +163,9 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         .raw_metadata(&source, &RawDecodeParams::default())
         .map_err(|e| JsValue::from_str(&format!("Rawler failed to get metadata: {:?}", e)))?;
     let exif = metadata.exif;
+
+    // Parse source TIFF for block copy
+    let tiff_reader = GenericTiffReader::new_with_buffer(input, 0, 0, None).ok();
 
     // Orientation mapping
     let orientation = match raw.orientation {
@@ -60,7 +197,7 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         ];
     }
 
-    // --- Thumbnail in IFD0 (1600px for high quality) ---
+    // --- Thumbnail generation ---
     let (thumb_data, thumb_w, thumb_h) = if let RawImageData::Integer(data) = &raw.data {
         let tw = 1600;
         let th = (raw.height * tw / raw.width) & !1;
@@ -169,7 +306,6 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
     let white_level = raw.whitelevels[0] as u32;
 
     let mut sub_ifd = Ifd::new(IfdType::Ifd);
-    // Insert in ascending order of Tag ID to satisfy TIFF spec
     sub_ifd.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0x00fe, IfdType::Ifd),
         0u32,
@@ -271,6 +407,17 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
 
     // --- EXIF IFD ---
     let mut exif_ifd = Ifd::new(IfdType::Exif);
+
+    // Try to block copy EXIF tags from source
+    if let Some(reader) = &tiff_reader {
+        let src_root_ifd = reader.root_ifd();
+        if let Some(src_exif_ifds) = src_root_ifd.sub_ifds().get(&0x8769) {
+            if let Some(src_exif_ifd) = src_exif_ifds.first() {
+                transfer_tags(src_exif_ifd, &mut exif_ifd, &[]);
+            }
+        }
+    }
+
     if let Some(et) = exif.exposure_time {
         exif_ifd.insert(
             MaybeKnownIfdFieldDescriptor::from_number(0x829a, IfdType::Exif),
@@ -310,6 +457,24 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
 
     // --- IFD0: Metadata and Thumbnail ---
     let mut ifd0 = Ifd::new(IfdType::Ifd);
+
+    // Try to block copy root tags and GPS from source
+    if let Some(reader) = &tiff_reader {
+        let src_root_ifd = reader.root_ifd();
+        transfer_tags(src_root_ifd, &mut ifd0, &[]);
+
+        if let Some(src_gps_ifds) = src_root_ifd.sub_ifds().get(&0x8825) {
+            if let Some(src_gps_ifd) = src_gps_ifds.first() {
+                let mut gps_ifd = Ifd::new(IfdType::GpsInfo);
+                transfer_tags(src_gps_ifd, &mut gps_ifd, &[]);
+                ifd0.insert(
+                    MaybeKnownIfdFieldDescriptor::from_number(0x8825, IfdType::Ifd),
+                    IfdValue::Ifd(gps_ifd),
+                );
+            }
+        }
+    }
+
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0x8769, IfdType::Ifd),
         IfdValue::Ifd(exif_ifd),
@@ -389,7 +554,7 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
     ); // DNGBackwardVersion
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0xc614, IfdType::Ifd),
-        format!("Sony {}", raw.model),
+        format!("{} {}", raw.make, raw.model),
     ); // UniqueCameraModel
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0xc621, IfdType::Ifd),
@@ -435,7 +600,7 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
     ); // CalibrationIlluminant1
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::Unknown(0xc6f8),
-        format!("Sony {}", raw.model),
+        format!("{} {}", raw.make, raw.model),
     ); // ProfileName
     ifd0.insert(MaybeKnownIfdFieldDescriptor::Unknown(0xc6fd), 0u32); // ProfileEmbedPolicy
     ifd0.insert(
@@ -443,7 +608,6 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         &[0u8; 16] as &[u8],
     ); // RawDataUniqueID
 
-    // Write
     let mut output = Cursor::new(Vec::new());
     DngWriter::write_dng(&mut output, true, FileType::Dng, vec![ifd0])
         .map_err(|e| JsValue::from_str(&format!("Failed to write DNG: {:?}", e)))?;
