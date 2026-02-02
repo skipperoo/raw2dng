@@ -6,6 +6,7 @@ use flate2::Compression as FlateCompression;
 use rawler::decoders::{RawDecodeParams, RawLoader as RawlerLoader};
 use rawler::formats::tiff::reader::{GenericTiffReader, TiffReader};
 use rawler::formats::tiff::Value as RawlerValue;
+use rawler::imgop::xyz::{Illuminant, XYZ_TO_SRGB_D65};
 use rawler::rawsource::RawSource;
 use rawloader::{Orientation as RawOrientation, RawImageData, RawLoader};
 use std::io::{Cursor, Write};
@@ -129,7 +130,6 @@ fn transfer_tags(src: &rawler::formats::tiff::IFD, dst: &mut Ifd, blacklist: &[u
         if blacklist.contains(&tag) {
             continue;
         }
-        // Skip dangerous tags (offsets, pointers, image-specific tags that should be managed manually)
         match tag {
             0x0111 | 0x0117 | 0x0144 | 0x0145 | 0x014a | 0x8769 | 0x8825 | 0x0100 | 0x0101
             | 0x0102 | 0x0103 | 0x0106 | 0x0115 | 0x0116 | 0x011c | 0x0153 => continue,
@@ -144,30 +144,70 @@ fn transfer_tags(src: &rawler::formats::tiff::IFD, dst: &mut Ifd, blacklist: &[u
     }
 }
 
-#[wasm_bindgen]
-pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
+fn invert_3x3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
+    if det.abs() < 1e-10 {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+    Some([
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+        ],
+    ])
+}
+
+fn mat_mul_3x3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut res = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                res[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    res
+}
+
+pub fn convert_raw_to_dng_inner(input: &[u8], _format: &str) -> Result<Vec<u8>, String> {
     let loader = RawLoader::new();
     let raw = loader
         .decode(&mut Cursor::new(input), false)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse RAW: {:?}", e)))?;
+        .map_err(|e| format!("Failed to parse RAW: {:?}", e))?;
 
-    // Extract EXIF using rawler
     let source = RawSource::new_from_slice(input);
     let rawler_loader = RawlerLoader::new();
     let decoder = rawler_loader
         .get_decoder(&source)
-        .map_err(|e| JsValue::from_str(&format!("Rawler failed to get decoder: {:?}", e)))?;
+        .map_err(|e| format!("Rawler failed to get decoder: {:?}", e))?;
     let metadata = decoder
         .raw_metadata(&source, &RawDecodeParams::default())
-        .map_err(|e| JsValue::from_str(&format!("Rawler failed to get metadata: {:?}", e)))?;
+        .map_err(|e| format!("Rawler failed to get metadata: {:?}", e))?;
     let exif = metadata.exif;
 
-    // Parse source TIFF for block copy
+    // Get full RawImage info (for camera color matrices) without full decode
+    let rawler_raw = rawler::decode_dummy(&source)
+        .map_err(|e| format!("Rawler failed to get camera info: {:?}", e))?;
+    let camera = rawler_raw.camera;
+
     let tiff_reader = GenericTiffReader::new_with_buffer(input, 0, 0, None).ok();
 
-    // Orientation mapping
     let orientation = match raw.orientation {
         RawOrientation::Normal => 1u16,
         RawOrientation::Rotate90 => 6u16,
@@ -176,15 +216,60 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         _ => 1u16,
     };
 
-    // --- Color Calibration (Sony ILCE-7M2 values) ---
-    let color_matrix_vals = vec![5271, -712, -347, -6153, 13653, 2763, -1601, 2366, 7242];
-    let color_matrix: Vec<IfdValue> = color_matrix_vals
-        .into_iter()
-        .map(|v| IfdValue::SRational(v, 10000))
-        .collect();
-    let matrix_list = IfdValue::List(color_matrix);
+    // --- Color Calibration from Rawler ---
+    let mut matrix1 = None;
+    let mut matrix2 = None;
+    let mut illu1 = Illuminant::Unknown;
+    let mut illu2 = Illuminant::Unknown;
 
-    // --- White Balance ---
+    // Pick matrices
+    if let Some(m) = camera
+        .color_matrix
+        .get(&Illuminant::D65)
+        .or_else(|| camera.color_matrix.get(&Illuminant::D55))
+    {
+        matrix2 = Some(m.clone());
+        illu2 = Illuminant::D65;
+    }
+    if let Some(m) = camera
+        .color_matrix
+        .get(&Illuminant::A)
+        .or_else(|| camera.color_matrix.get(&Illuminant::Tungsten))
+    {
+        matrix1 = Some(m.clone());
+        illu1 = Illuminant::A;
+    }
+
+    // Fallback if we only have one
+    if matrix1.is_none() && matrix2.is_none() {
+        if let Some((&illu, m)) = camera.color_matrix.iter().next() {
+            matrix1 = Some(m.clone());
+            illu1 = illu;
+        }
+    }
+
+    // Default Sony-like fallback if still none
+    let matrix1_final = matrix1.unwrap_or_else(|| {
+        vec![
+            0.5271, -0.0712, -0.0347, -0.6153, 1.3653, 0.2763, -0.1601, 0.2366, 0.7242,
+        ]
+    });
+    let illu1_final = if illu1 == Illuminant::Unknown {
+        Illuminant::D65
+    } else {
+        illu1
+    };
+
+    let cam_to_srgb = {
+        let m = &matrix2.clone().unwrap_or_else(|| matrix1_final.clone());
+        let xyz_to_cam = [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]];
+        if let Some(cam_to_xyz) = invert_3x3(xyz_to_cam) {
+            mat_mul_3x3(XYZ_TO_SRGB_D65, cam_to_xyz)
+        } else {
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        }
+    };
+
     let mut neutral = Vec::new();
     if raw.wb_coeffs[0] > 0.0 && raw.wb_coeffs[1] > 0.0 && raw.wb_coeffs[2] > 0.0 {
         let r = raw.wb_coeffs[0];
@@ -249,30 +334,50 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
                     }
                 }
 
-                let r_avg = if r_cnt > 0 {
+                let r_lin = if r_cnt > 0 {
                     (r_sum / r_cnt as f32 - black).max(0.0) / range
                 } else {
                     0.0
-                };
-                let g_avg = if g_cnt > 0 {
+                } * r_coeff;
+                let g_lin = if g_cnt > 0 {
                     (g_sum / g_cnt as f32 - black).max(0.0) / range
                 } else {
                     0.0
                 };
-                let b_avg = if b_cnt > 0 {
+                let b_lin = if b_cnt > 0 {
                     (b_sum / b_cnt as f32 - black).max(0.0) / range
                 } else {
                     0.0
+                } * b_coeff;
+
+                // Matrix transform to sRGB
+                let rs = cam_to_srgb[0][0] * r_lin
+                    + cam_to_srgb[0][1] * g_lin
+                    + cam_to_srgb[0][2] * b_lin;
+                let gs = cam_to_srgb[1][0] * r_lin
+                    + cam_to_srgb[1][1] * g_lin
+                    + cam_to_srgb[1][2] * b_lin;
+                let bs = cam_to_srgb[2][0] * r_lin
+                    + cam_to_srgb[2][1] * g_lin
+                    + cam_to_srgb[2][2] * b_lin;
+
+                let exposure = 1.5; // Slight boost
+                let rs = (rs * exposure).max(0.0);
+                let gs = (gs * exposure).max(0.0);
+                let bs = (bs * exposure).max(0.0);
+
+                // sRGB gamma
+                let f = |x: f32| {
+                    if x <= 0.0031308 {
+                        12.92 * x
+                    } else {
+                        1.055 * x.powf(1.0 / 2.4) - 0.055
+                    }
                 };
 
-                let gain = 5.0;
-                let r8 = (r_avg * r_coeff * gain).powf(1.0 / 2.2).min(1.0) * 255.0;
-                let g8 = (g_avg * 1.0 * gain).powf(1.0 / 2.2).min(1.0) * 255.0;
-                let b8 = (b_avg * b_coeff * gain).powf(1.0 / 2.2).min(1.0) * 255.0;
-
-                tdata.push(r8 as u8);
-                tdata.push(g8 as u8);
-                tdata.push(b8 as u8);
+                tdata.push((f(rs).min(1.0) * 255.0) as u8);
+                tdata.push((f(gs).min(1.0) * 255.0) as u8);
+                tdata.push((f(bs).min(1.0) * 255.0) as u8);
             }
         }
         (tdata, tw, th)
@@ -280,7 +385,6 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         (vec![128u8; 16 * 16 * 3], 16, 16)
     };
 
-    // --- SubIFD: RAW data ---
     let byte_data = match &raw.data {
         RawImageData::Integer(data) => {
             let mut bytes = Vec::with_capacity(data.len() * 2);
@@ -289,17 +393,16 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
             }
             bytes
         }
-        _ => return Err(JsValue::from_str("Unsupported data")),
+        _ => return Err("Unsupported data".to_string()),
     };
 
-    // Compression (Adobe Deflate)
     let mut encoder = ZlibEncoder::new(Vec::new(), FlateCompression::default());
     encoder
         .write_all(&byte_data)
-        .map_err(|e| JsValue::from_str(&format!("Failed to compress: {:?}", e)))?;
+        .map_err(|e| format!("Failed to compress: {:?}", e))?;
     let compressed_data = encoder
         .finish()
-        .map_err(|e| JsValue::from_str(&format!("Failed to finish compress: {:?}", e)))?;
+        .map_err(|e| format!("Failed to finish compress: {:?}", e))?;
     let data_len = compressed_data.len() as u32;
 
     let black_level = raw.blacklevels[0] as u32;
@@ -405,7 +508,6 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         &[0u16, 0, raw.height as u16, raw.width as u16] as &[u16],
     ); // ActiveArea
 
-    // --- EXIF IFD ---
     let mut exif_ifd = Ifd::new(IfdType::Exif);
 
     // Try to block copy EXIF tags from source
@@ -455,7 +557,6 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         ); // CreateDate
     }
 
-    // --- IFD0: Metadata and Thumbnail ---
     let mut ifd0 = Ifd::new(IfdType::Ifd);
 
     // Try to block copy root tags and GPS from source
@@ -543,7 +644,10 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         MaybeKnownIfdFieldDescriptor::from_number(0x014a, IfdType::Ifd),
         IfdValue::List(vec![IfdValue::Ifd(sub_ifd)]),
     ); // SubIFDs
-    ifd0.insert(MaybeKnownIfdFieldDescriptor::Unknown(0xa001), 65535u16); // ColorSpace: Uncalibrated
+    ifd0.insert(
+        MaybeKnownIfdFieldDescriptor::from_number(0xa001, IfdType::Ifd),
+        1u16,
+    ); // ColorSpace: sRGB
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0xc612, IfdType::Ifd),
         &[1u8, 4, 0, 0] as &[u8],
@@ -556,10 +660,37 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         MaybeKnownIfdFieldDescriptor::from_number(0xc614, IfdType::Ifd),
         format!("{} {}", raw.make, raw.model),
     ); // UniqueCameraModel
+
+    // Embed dynamic matrices
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0xc621, IfdType::Ifd),
-        matrix_list,
+        IfdValue::List(
+            matrix1_final
+                .iter()
+                .map(|&v| IfdValue::SRational((v * 10000.0) as i32, 10000))
+                .collect(),
+        ),
     ); // ColorMatrix1
+    ifd0.insert(
+        MaybeKnownIfdFieldDescriptor::from_number(0xc65a, IfdType::Ifd),
+        illu1_final as u16,
+    ); // CalibrationIlluminant1
+
+    if let Some(m2) = matrix2 {
+        ifd0.insert(
+            MaybeKnownIfdFieldDescriptor::from_number(0xc622, IfdType::Ifd),
+            IfdValue::List(
+                m2.iter()
+                    .map(|&v| IfdValue::SRational((v * 10000.0) as i32, 10000))
+                    .collect(),
+            ),
+        ); // ColorMatrix2
+        ifd0.insert(
+            MaybeKnownIfdFieldDescriptor::from_number(0xc65b, IfdType::Ifd),
+            illu2 as u16,
+        ); // CalibrationIlluminant2
+    }
+
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::from_number(0xc627, IfdType::Ifd),
         IfdValue::List(vec![
@@ -594,10 +725,7 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
         MaybeKnownIfdFieldDescriptor::Unknown(0xc633),
         IfdValue::Rational(1, 1),
     ); // ShadowScale
-    ifd0.insert(
-        MaybeKnownIfdFieldDescriptor::from_number(0xc65a, IfdType::Ifd),
-        21u16,
-    ); // CalibrationIlluminant1
+
     ifd0.insert(
         MaybeKnownIfdFieldDescriptor::Unknown(0xc6f8),
         format!("{} {}", raw.make, raw.model),
@@ -610,9 +738,16 @@ pub fn convert_raw_to_dng(input: &[u8], _format: &str) -> Result<Vec<u8>, JsValu
 
     let mut output = Cursor::new(Vec::new());
     DngWriter::write_dng(&mut output, true, FileType::Dng, vec![ifd0])
-        .map_err(|e| JsValue::from_str(&format!("Failed to write DNG: {:?}", e)))?;
+        .map_err(|e| format!("Failed to write DNG: {:?}", e))?;
 
     Ok(output.into_inner())
+}
+
+#[wasm_bindgen]
+pub fn convert_raw_to_dng(input: &[u8], format: &str) -> Result<Vec<u8>, JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+    convert_raw_to_dng_inner(input, format).map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(test)]
@@ -621,9 +756,17 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_conversion() {
+    fn test_conversion_arw() {
         let raw_data = fs::read("../samples/_DSC3731.ARW").expect("Failed to read ARW");
-        let dng_data = convert_raw_to_dng(&raw_data, "arw").expect("Conversion failed");
+        let dng_data = convert_raw_to_dng_inner(&raw_data, "arw").expect("Conversion failed");
         fs::write("../samples/_DSC3731_test.dng", dng_data).expect("Failed to write DNG");
+    }
+
+    #[test]
+    fn test_conversion_canon() {
+        let raw_data =
+            fs::read("../samples/sample-CR2-Image-File.cr2").expect("Failed to read CR2");
+        let dng_data = convert_raw_to_dng_inner(&raw_data, "cr2").expect("Conversion failed");
+        fs::write("../samples/canon_test.dng", dng_data).expect("Failed to write DNG");
     }
 }
