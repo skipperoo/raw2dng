@@ -6,7 +6,7 @@
     <title>RAW to DNG Converter</title>
     <meta
       name="description"
-      content="Privacy-first, client-side RAW to DNG converter for iPad and Desktop."
+      content="RAW to DNG converter for Mobile, Tablet & Desktop."
     />
 
     <!-- PWA / iOS Tags -->
@@ -382,7 +382,7 @@
           <a href="https://github.com/skipperoo/raw2dng" target="_blank"
             >GitHub</a
           >
-          <a href="#">Privacy Policy</a>
+          <a class="hidden" href="#">Privacy Policy</a>
         </div>
         <div>
           Built with Rust & WebAssembly. All processing happens locally on your
@@ -541,11 +541,6 @@
 
         log(`Selected ${files.length} files. Adding to queue...`);
         downloadContainer.classList.remove("hidden");
-
-        // We don't reset convertedFiles here to allow adding more to the batch
-        // or we can reset if that's the desired behavior. The previous code reset it.
-        // User said "photo in the batch that are still processing", implying a batch.
-        // Let's reset on every file selection to match previous behavior.
         convertedFiles = [];
         downloadArea.innerHTML = "";
 

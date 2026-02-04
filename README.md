@@ -1,17 +1,15 @@
-# RAW to DNG Converter (WebAssembly)
+# RAW to DNG Converter
 
-A privacy-first, client-side RAW image to DNG converter designed for iPad and Desktop browsers. This tool allows you to batch convert RAW files (like Sony .ARW) to Adobe DNG format entirely in your browser using Rust and WebAssembly.
-
-It is based on [Dnglab](https://github.com/dnglab/dnglab), so it should support the same RAW formats, but YMMV.
+A privacy-first, client-side RAW image to DNG converter designed for Mobile, Tablets and Desktop browsers. This tool allows you to batch convert RAW files (like Sony .ARW) to Adobe DNG format entirely in your browser.
+It is written in Rust and compile to WASM, while the image processing is based on [Dnglab](https://github.com/dnglab/dnglab), so it should support the same RAW formats, but YMMV.
 
 ## Features
 
-- **Privacy-First**: No data is uploaded to any server. All processing happens locally on your device.
+- **Privacy-First**: The photos are converted locally on your device.
 - **Batch Processing**: Convert multiple images sequentially.
-- **High-Quality Previews**: Generates 1600px thumbnails using box-filter downsampling.
-- **EXIF Preservation**: Extracts and embeds shooting data (Exposure, ISO, Aperture, etc.) using `rawler`.
-- **PWA Support**: Can be installed as a standalone app on iOS, Android, and Desktop.
 - **ZIP Export**: Option to download all converted DNGs in a single ZIP archive.
+- **EXIF Preservation**: Extracts and embeds shooting data (Exposure, ISO, Aperture, etc.) using `rawler` (tested on .ARW and .CR2 formats).
+- **PWA Support**: Can be installed as a standalone app on iOS, Android, and Desktop.
 
 ## Getting Started
 
@@ -47,15 +45,6 @@ Use the provided `docker-compose-dev.yml` file:
 ```bash
 docker compose -f docker-compose-dev.yml --build
 ```
-
-## Technical Stack
-
-- **Core Logic**: Rust
-- **Wasm Bindings**: `wasm-bindgen`
-- **RAW Parsing**: `rawloader` & `rawler`
-- **DNG Writing**: `dnglab` (via the `dng` crate)
-- **Web Server**: Angie (Nginx fork)
-- **Frontend**: Plain JS/HTML5 with Web Workers
 
 ## License
 
