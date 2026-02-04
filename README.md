@@ -2,6 +2,8 @@
 
 A privacy-first, client-side RAW image to DNG converter designed for iPad and Desktop browsers. This tool allows you to batch convert RAW files (like Sony .ARW) to Adobe DNG format entirely in your browser using Rust and WebAssembly.
 
+It is based on [Dnglab](https://github.com/dnglab/dnglab), so it should support the same RAW formats, but YMMV.
+
 ## Features
 
 - **Privacy-First**: No data is uploaded to any server. All processing happens locally on your device.
@@ -40,28 +42,11 @@ Access the application at `http://localhost:8080`.
 
 ### Local Development
 
-#### Prerequisites
+Use the provided `docker-compose-dev.yml` file:
 
-- [Rust](https://www.rust-lang.org/)
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/)
-- [ImageMagick](https://imagemagick.org/) (for icon generation)
-
-#### Build
-
-1. Build the WebAssembly module:
-
-   ```bash
-   cd raw2dng
-   wasm-pack build --target web --release
-   ```
-
-2. Generate icons:
-
-   ```bash
-   ./create_icons.sh your_master_icon.png
-   ```
-
-3. Serve the `www` directory using any static web server (e.g., `python -m http.server`).
+```bash
+docker compose -f docker-compose-dev.yml --build
+```
 
 ## Technical Stack
 
@@ -74,4 +59,4 @@ Access the application at `http://localhost:8080`.
 
 ## License
 
-© 2026 Leonardo Scoppitto. Built with Rust and WebAssembly.
+MIT
