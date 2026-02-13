@@ -372,9 +372,6 @@
             <button id="downloadAllBtn" class="btn btn-primary">
               Download All
             </button>
-            <button id="clearBtn" class="btn btn-secondary" title="Clear all files from storage">
-              Clear
-            </button>
           </div>
         </div>
         <div id="downloadArea" class="download-list"></div>
@@ -396,6 +393,8 @@
     </div>
 
     <script type="module">
+      import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
+
       const fileInput = document.getElementById("fileInput");
       const statusLog = document.getElementById("statusLog");
       const statusSpinner = document.getElementById("statusSpinner");
@@ -404,9 +403,8 @@
       const downloadContainer = document.getElementById("downloadContainer");
       const downloadAllBtn = document.getElementById("downloadAllBtn");
       const zipToggle = document.getElementById("zipToggle");
-      const clearBtn = document.getElementById("clearBtn");
 
-      let convertedFiles = []; // Array of { name, size }
+      let convertedFiles = []; // Array of { name, blob }
       let processingQueue = [];
       let isProcessing = false;
       let worker = null;
@@ -423,12 +421,10 @@
           statusSpinner.classList.remove("hidden");
           stopBtn.classList.remove("hidden");
           downloadAllBtn.disabled = true;
-          clearBtn.disabled = true;
         } else {
           statusSpinner.classList.add("hidden");
           stopBtn.classList.add("hidden");
           downloadAllBtn.disabled = false;
-          clearBtn.disabled = false;
         }
       }
 
@@ -474,41 +470,29 @@
         });
       }
 
-      async function handleConvertSuccess({ originalName, dngName, id, size }) {
-        const opfsRoot = await navigator.storage.getDirectory();
-        const fileHandle = await opfsRoot.getFileHandle(dngName);
-        
+      function handleConvertSuccess({ dngBuffer, fileName, id }) {
+        const blob = new Blob([dngBuffer], { type: "image/x-adobe-dng" });
+        const url = URL.createObjectURL(blob);
         convertedFiles.push({
-          name: dngName,
-          size: size
+          name: fileName.replace(/\.[^/.]+$/, "") + ".dng",
+          blob,
         });
 
         const item = document.createElement("div");
         item.className = "download-item";
-        
         const link = document.createElement("a");
-        link.href = "#";
-        link.textContent = `Download ${dngName}`;
-        link.onclick = async (e) => {
-          e.preventDefault();
-          const file = await fileHandle.getFile();
-          const url = URL.createObjectURL(file);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = dngName;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 100);
-        };
-        
+        link.href = url;
+        link.download = fileName.replace(/\.[^/.]+$/, "") + ".dng";
+        link.textContent = `Download ${link.download}`;
         const sizeBadge = document.createElement("span");
         sizeBadge.className = "badge";
-        sizeBadge.textContent = `${(size / 1024 / 1024).toFixed(2)} MB`;
+        sizeBadge.textContent = `${(blob.size / 1024 / 1024).toFixed(2)} MB`;
 
         item.appendChild(link);
         item.appendChild(sizeBadge);
         downloadArea.appendChild(item);
 
-        log(`  Success: ${dngName}`);
+        log(`  Success: ${fileName}`);
         isProcessing = false;
         processNextInQueue();
       }
@@ -536,15 +520,16 @@
         );
 
         try {
-          // Send file object directly to worker (it will be cloned or transferred)
+          const buffer = await file.arrayBuffer();
           worker.postMessage(
             {
               type: "convert",
-              payload: { file, id: Date.now() },
-            }
+              payload: { buffer, fileName: file.name, id: Date.now() },
+            },
+            [buffer],
           );
         } catch (err) {
-          log(`  Failed to send file to worker: ${err}`);
+          log(`  Failed to read file: ${err}`);
           isProcessing = false;
           processNextInQueue();
         }
@@ -556,8 +541,9 @@
 
         log(`Selected ${files.length} files. Adding to queue...`);
         downloadContainer.classList.remove("hidden");
-        // We don't clear convertedFiles here anymore to allow multiple selections
-        
+        convertedFiles = [];
+        downloadArea.innerHTML = "";
+
         files.forEach((file) => {
           processingQueue.push({ file });
         });
@@ -569,32 +555,18 @@
       downloadAllBtn.addEventListener("click", async () => {
         if (zipToggle.checked) {
           log("Generating ZIP archive...");
-          try {
-            // Check if Service Worker is active for streaming
-            if (navigator.serviceWorker.controller) {
-              log("Streaming ZIP via Service Worker...");
-              window.location.href = "./download-zip";
-            } else {
-              log("Fallback to in-memory ZIP generation...");
-              const { downloadZip } = await import("https://cdn.jsdelivr.net/npm/client-zip@2.1.0/+esm");
-              const opfsRoot = await navigator.storage.getDirectory();
-              const files = [];
-              for (const f of convertedFiles) {
-                const handle = await opfsRoot.getFileHandle(f.name);
-                files.push(await handle.getFile());
-              }
-              const blob = await downloadZip(files).blob();
-              const url = URL.createObjectURL(blob);
-              const link = document.createElement("a");
-              link.href = url;
-              link.download = `converted_images_${Date.now()}.zip`;
-              link.click();
-              URL.revokeObjectURL(url);
-              log("ZIP archive downloaded.");
-            }
-          } catch (err) {
-            log(`ZIP Generation Error: ${err}`);
-          }
+          const zip = new JSZip();
+          convertedFiles.forEach((file) => {
+            zip.file(file.name, file.blob);
+          });
+          const content = await zip.generateAsync({ type: "blob" });
+          const url = URL.createObjectURL(content);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `converted_images_${Date.now()}.zip`;
+          link.click();
+          URL.revokeObjectURL(url);
+          log("ZIP archive downloaded.");
         } else {
           const links = downloadArea.querySelectorAll("a");
           log(`Triggering download for ${links.length} files...`);
@@ -603,23 +575,6 @@
               link.click();
             }, index * 200);
           });
-        }
-      });
-
-      clearBtn.addEventListener("click", async () => {
-        if (isProcessing) return;
-        log("Clearing storage...");
-        try {
-          const root = await navigator.storage.getDirectory();
-          for await (const name of root.keys()) {
-            await root.removeEntry(name);
-          }
-          convertedFiles = [];
-          downloadArea.innerHTML = "";
-          downloadContainer.classList.add("hidden");
-          log("Storage cleared.");
-        } catch (err) {
-          log(`Error clearing storage: ${err}`);
         }
       });
 
@@ -633,7 +588,7 @@
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {
           navigator.serviceWorker
-            .register("./sw.js", { type: "module" })
+            .register("./sw.js")
             .then((reg) => console.log("SW registered"))
             .catch((err) => console.error("SW failed", err));
         });
